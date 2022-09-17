@@ -145,7 +145,7 @@ class Client:
                 file_path.close()
                 self.local_flag = True  # Lets program know there is local log data.
                 self.log = ''
-        file_path.close()
+            file_path.close()
         self.send_log()
 
     def find_local_key(self):  # Will check if local key is available to append local log.

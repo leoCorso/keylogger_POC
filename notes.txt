@@ -1,0 +1,17 @@
+Working:
+	Offline logging
+	Diffie-Hellman key exchange
+	AES Encryption of data between Server and client
+	Connects to ODBC DB
+	Inits SQL DB tables
+	Logs user keystrokes to SQL DB
+	Allow remote execution on client program
+		Kill session
+		Delete client exe
+		Add to registry startup
+
+
+Coming soon:
+	Allow for use without SQL DB.
+	Find cookies on client machine
+	
